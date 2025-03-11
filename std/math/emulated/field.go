@@ -53,6 +53,58 @@ type Field[T FieldParams] struct {
 
 type ctxKey[T FieldParams] struct{}
 
+func NewFieldFromParams[T FieldParams](fieldParams T, native frontend.API) (*Field[T], error) {
+	if storer, ok := native.(kvstore.Store); ok {
+		ff := storer.GetKeyValue(ctxKey[T]{})
+		if ff, ok := ff.(*Field[T]); ok {
+			return ff, nil
+		}
+	}
+	f := &Field[T]{
+		api:              native,
+		log:              logger.Logger(),
+		constrainedLimbs: make(map[[16]byte]struct{}),
+		checker:          rangecheck.New(native),
+	}
+
+	f.fParams = fieldParams
+
+	// ensure prime is correctly set
+	if f.fParams.IsPrime() {
+		if !f.fParams.Modulus().ProbablyPrime(20) {
+			return nil, errors.New("invalid parametrization: modulus is not prime")
+		}
+	}
+
+	if f.fParams.BitsPerLimb() < 3 {
+		// even three is way too small, but it should probably work.
+		return nil, errors.New("nbBits must be at least 3")
+	}
+
+	if f.fParams.Modulus().Cmp(big.NewInt(1)) < 1 {
+		return nil, errors.New("n must be at least 2")
+	}
+
+	nbLimbs := (uint(f.fParams.Modulus().BitLen()) + f.fParams.BitsPerLimb() - 1) / f.fParams.BitsPerLimb()
+	if nbLimbs != f.fParams.NbLimbs() {
+		return nil, fmt.Errorf("nbLimbs mismatch got %d expected %d", f.fParams.NbLimbs(), nbLimbs)
+	}
+
+	if f.api == nil {
+		return f, errors.New("missing api")
+	}
+
+	if uint(f.api.Compiler().FieldBitLen()) < 2*f.fParams.BitsPerLimb()+1 {
+		return nil, fmt.Errorf("elements with limb length %d does not fit into scalar field", f.fParams.BitsPerLimb())
+	}
+
+	native.Compiler().Defer(f.performDeferredChecks)
+	if storer, ok := native.(kvstore.Store); ok {
+		storer.SetKeyValue(ctxKey[T]{}, f)
+	}
+	return f, nil
+}
+
 // NewField returns an object to be used in-circuit to perform emulated
 // arithmetic over the field defined by type parameter [FieldParams]. The
 // operations on this type are defined on [Element].
